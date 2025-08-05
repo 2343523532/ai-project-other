@@ -1,0 +1,7 @@
+agents:
+  - name: all_purpose_ai
+    entry: agents/freysa_agent.py
+    class: FreysaSentientAI
+    tee: true
+    on_chain: true
+    memory_cap: 2048
