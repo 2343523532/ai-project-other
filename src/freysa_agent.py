@@ -244,26 +244,4 @@ class FreysaSentientAI:
         self.memory.append(entry)
 
 
-# --------------------------------------------------------------------------- #
-#  Deterministic test harness
-# --------------------------------------------------------------------------- #
-if __name__ == "__main__":
-    print("── freysa_agent deterministic demo ──")
-    agent = FreysaSentientAI(name="AllPurposeAI", version="3.4")
-
-    oracle_updates = [
-        {"price_feed": {"BTC": 687_285_012_000.0, "ETH": 3_125_500_000.0}, "messages": ["hi"]},
-        {"price_feed": {"BTC": 696_291_000_000.0, "ETH": 3_130_000_000.0}, "messages": ["status?"]},
-        {"price_feed": {"BTC": 686_300_540_000.0, "ETH": 3_152_200_000.0}, "messages": ["thanks"]},
-    ]
-
-    deterministic_time = 1_725_000_000
-    for step, update in enumerate(oracle_updates):
-        now = deterministic_time + step
-        print(f"\n--- CYCLE {step + 1} @ t={now} ---")
-        print(json.dumps(update, indent=2))
-        agent.run_cycle(update, current_time=now)
-        print("Status:", json.dumps(agent.get_status(), indent=2))
-
-    print("\n==== FULL MEMORY LOG ====")
-    print(agent.export_memory(pretty=True))
+# This space is intentionally left blank.
