@@ -1,323 +1,212 @@
-git clone https://github.com/2343523532/ai-project-other.git
-cd ai-project-other
-PAT TOKEN: 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
-# 1. Put the agent in place
-mkdir -p agents
-cat > agents/freysa_agent.py <<'PY'
-<------------------------ paste the entire freysa_agent.py here ------------------------>
-# freysa_agent.py
-"""
-Deterministic AI Agent Core for Secure Distributed Environments
-
-Core architecture for Freysa.AI's trusted execution environment (TEE) agents,
-providing secure, deterministic behavior for price monitoring and autonomous
-decision making in blockchain contexts.
-"""
+"""Command-line utilities for running deterministic Freysa agent simulations."""
 
 from __future__ import annotations
 
-import hashlib
+import argparse
 import json
-from dataclasses import asdict, dataclass, field
-from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Protocol, TypeAlias, final
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence
 
-JSON: TypeAlias = Dict[str, Any]
+from agents import FreysaSentientAI
 
-# --------------------------------------------------------------------------- #
-#  Enums and Constants
-# --------------------------------------------------------------------------- #
-class AgentHealthState(Enum):
-    IDLE = auto()
-    ACTIVE = auto()
-    DEGRADED = auto()
-    RECOVERING = auto()
 
-class AgentAwarenessState(Enum):
-    OBSERVING = auto()
-    REFLECTING = auto()
-    ALERTED = auto()
-
-# --------------------------------------------------------------------------- #
-#  Protocols (Pluggable Components)
-# --------------------------------------------------------------------------- #
-class Clock(Protocol):
-    """Provides deterministic time within TEE environment"""
-    def now(self) -> int: ...
-
-    def since(self, timestamp: int) -> int: ...
-
-class Limiter(Protocol):
-    """Condition evaluation for agent activation"""
-    def evaluate(self, price_data: Dict[str, float]) -> bool: ...
-
-class EventLogger(Protocol):
-    """Abstraction for log persistence"""
-    def record(self, entry: Dict[str, Any]) -> None: ...
-
-# --------------------------------------------------------------------------- #
-#  Core Data Structures
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True, slots=True)
-class MarketData:
-    assets: Dict[str, float]
-    average: float = field(init=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, 'average', 
-                          sum(self.assets.values()) / len(self.assets) if self.assets else 0.0)
-
-@dataclass(frozen=True, slots=True)
-class AgentMessage:
-    content: str
-    urgency: int = 1
-    source: str = "unknown"
-
-# --------------------------------------------------------------------------- #
-#  Agent State
-# --------------------------------------------------------------------------- #
 @dataclass(slots=True)
-class AgentState:
-    awareness: AgentAwarenessState = AgentAwarenessState.OBSERVING
-    health: AgentHealthState = AgentHealthState.IDLE
-    last_cycle: int = 0
-    total_cycles: int = 0
-    memory_used: int = 0
+class ScenarioUpdate:
+    """Single update entry for the agent simulation."""
 
-    metrics: Dict[str, float] = field(default_factory=dict)
+    offset: int
+    price_feed: Optional[dict] = None
+    messages: Optional[List[str]] = None
 
-    def snapshot(self) -> JSON:
-        return {
-            'awareness': self.awareness.name,
-            'health': self.health.name,
-            'last_cycle': self.last_cycle,
-            'memory_used': self.memory_used,
-            **self.metrics
-        }
+    def payload(self) -> dict:
+        data: dict = {}
+        if self.price_feed:
+            data["price_feed"] = self.price_feed
+        if self.messages:
+            data["messages"] = self.messages
+        return data
 
-# --------------------------------------------------------------------------- #
-#  Default Implementations
-# --------------------------------------------------------------------------- #
-class TEEClock:
-    """Deterministic clock for TEE environments"""
-    def __init__(self, epoch: int = 0) -> None:
-        self._time = epoch
 
-    def now(self) -> int:
-        return self._time
+@dataclass(slots=True)
+class FreysaScenario:
+    """A deterministic sequence of updates to feed into the agent."""
 
-    def since(self, timestamp: int) -> int:
-        return self._time - timestamp
+    agent_name: str
+    agent_version: str
+    start_time: int
+    updates: List[ScenarioUpdate]
 
-    def advance(self, seconds: int = 1) -> None:
-        self._time += seconds
-
-class MarketActivityLimiter:
-    """Default market condition evaluator"""
-    THRESHOLDS = {
-        'BTC': 690_000_000_000,
-        'ETH': 3_140_000_000,
-        'AVG': 6_290_000_000
-    }
-
-    def evaluate(self, data: MarketData) -> bool:
-        if not data.assets:
-            return False
-        
-        btc_alert = data.assets.get('BTC', 0) > self.THRESHOLDS['BTC']
-        eth_alert = data.assets.get('ETH', 0) > self.THRESHOLDS['ETH']
-        avg_alert = data.average > self.THRESHOLDS['AVG']
-        
-        return any((btc_alert, eth_alert, avg_alert))
-
-# --------------------------------------------------------------------------- #
-#  Main Agent Class
-# --------------------------------------------------------------------------- #
-@final
-class FreysaAgentCore:
-    VERSION = "2.0.0"
-    MEMORY_LIMIT = 2_048  # KiB
-    
-    def __init__(
-        self,
-        agent_id: str,
-        *,
-        clock: Optional[Clock] = None,
-        limiter: Optional[Limiter] = None,
-        logger: Optional[EventLogger] = None
-    ) -> None:
-        self.id = agent_id
-        self.version = self.VERSION
-        self._identity_hash = hashlib.sha256(
-            f"{agent_id}:{self.VERSION}".encode()
-        ).hexdigest()
-
-        # Injection points
-        self.clock = clock or TEEClock()
-        self.limiter = limiter or MarketActivityLimiter()
-        self.logger = logger
-
-        self.state = AgentState()
-        self._memory: List[Dict[str, Any]] = []
-
-        self._init_agent()
-
-    # Public Interface
-    def execute_cycle(self, inputs: JSON) -> JSON:
-        """Process new data and return updated state"""
-        self._pre_cycle_checks()
-        
-        # Process inputs through validation pipeline
-        market_data = self._parse_market_data(inputs.get('market'))
-        messages = self._parse_messages(inputs.get('messages'))
-        
-        # Core logic
-        market_event = self._analyze_market(market_data)
-        self._update_state(market_event)
-        self._perform_metacognition()
-        
-        return self._package_output()
-
-    def get_status(self) -> JSON:
-        """Return current agent status snapshot"""
-        return {
-            'agent_id': self.id,
-            'version': self.version,
-            'state': self.state.snapshot(),
-            'memory_usage': len(self._memory),
-        }
-
-    def reset(self) -> None:
-        """Reset agent to initial state"""
-        self.state = AgentState()
-        self._memory.clear()
-        self._log_event('SYSTEM', 'Agent reset initialized')
-
-    # Implementation Details
-    def _init_agent(self) -> None:
-        self._log_event('SYSTEM', 'Agent initialized', {
-            'id': self.id,
-            'version': self.version
-        })
-
-    def _pre_cycle_checks(self) -> None:
-        current_time = self.clock.now()
-        
-        if current_time <= self.state.last_cycle:
-            self.state.health = AgentHealthState.DEGRADED
-            self._log_event('WARNING', 'Time anomaly detected', {
-                'current': current_time,
-                'last_cycle': self.state.last_cycle
-            })
-            return
-        
-        self.state.last_cycle = current_time
-        self.state.total_cycles += 1
-        self.state.health = AgentHealthState.ACTIVE
-
-    def _analyze_market(self, data: MarketData) -> str:
-        if self.limiter.evaluate(data):
-            self.state.awareness = AgentAwarenessState.ALERTED
-            return 'MARKET_EVENT'
-        return 'NO_EVENT'
-
-    def _update_state(self, event: str) -> None:
-        if event == 'MARKET_EVENT':
-            self.state.metrics['last_event'] = self.clock.now()
-            self.state.metrics['event_count'] = self.state.metrics.get('event_count', 0) + 1
-
-    def _perform_metacognition(self) -> None:
-        # Simple reflection mechanism - could be expanded
-        if self.state.awareness == AgentAwarenessState.ALERTED:
-            self.state.awareness = AgentAwarenessState.REFLECTING
-            self._log_event('REFLECTION', 'Processing recent alert')
-        else:
-            self.state.awareness = AgentAwarenessState.OBSERVING
-
-    def _package_output(self) -> JSON:
-        return {
-            'timestamp': self.clock.now(),
-            'state': self.state.snapshot(),
-            'health_ok': self.state.health == AgentHealthState.ACTIVE
-        }
-
-    def _parse_market_data(self, raw: Any) -> MarketData:
-        if not isinstance(raw, dict):
-            self._log_event('VALIDATION', 'Invalid market data format', {'type': type(raw).__name__})
-            return MarketData({})
-            
+    @classmethod
+    def from_json(cls, raw: dict) -> "FreysaScenario":
         try:
-            return MarketData({k: float(v) for k, v in raw.items()})
-        except (ValueError, TypeError) as e:
-            self._log_event('ERROR', 'Market data conversion failed', {'error': str(e)})
-            return MarketData({})
+            updates_raw = raw["updates"]
+        except KeyError as exc:  # pragma: no cover - defensive guard
+            raise ValueError("Scenario missing 'updates' key") from exc
 
-    def _parse_messages(self, raw: Any) -> List[AgentMessage]:
-        if not isinstance(raw, list):
-            return []
-            
-        return [
-            AgentMessage(str(item)) 
-            for item in raw 
-            if isinstance(item, (str, dict))
+        updates = [
+            ScenarioUpdate(
+                offset=int(item.get("offset", 0)),
+                price_feed=item.get("price_feed"),
+                messages=item.get("messages"),
+            )
+            for item in updates_raw
         ]
+        return cls(
+            agent_name=str(raw.get("agent", {}).get("name", "Freysa")),
+            agent_version=str(raw.get("agent", {}).get("version", "1.0")),
+            start_time=int(raw.get("start_time", 0)),
+            updates=updates,
+        )
 
-    def _log_event(self, event_type: str, message: str, data: Optional[Dict] = None) -> None:
-        entry = {
-            'timestamp': self.clock.now(),
-            'event': event_type,
-            'message': message,
-            'agent_state': self.state.snapshot(),
-            **(data or {})
+    def to_json(self) -> dict:
+        return {
+            "agent": {"name": self.agent_name, "version": self.agent_version},
+            "start_time": self.start_time,
+            "updates": [
+                {
+                    "offset": update.offset,
+                    "price_feed": update.price_feed,
+                    "messages": update.messages,
+                }
+                for update in self.updates
+            ],
         }
-        
-        if self.logger:
-            self.logger.record(entry)
-        else:
-            self._memory.append(entry)
-            if len(self._memory) > self.MEMORY_LIMIT:
-                self._memory.pop(0)
 
-# --------------------------------------------------------------------------- #
-#  Demo / Test Harness
-# --------------------------------------------------------------------------- #
+
+@dataclass(slots=True)
+class SimulationResult:
+    """Container for the statuses produced during a scenario run."""
+
+    statuses: List[dict]
+    memory_dump: str
+
+    def summary(self) -> dict:
+        cycles = len(self.statuses)
+        last_state = self.statuses[-1]["state"] if self.statuses else {}
+        last_health = last_state.get("health")
+        avg_prices = [status.get("avg_price") for status in self.statuses if status.get("avg_price")]
+        avg_price = sum(avg_prices) / len(avg_prices) if avg_prices else None
+        return {
+            "cycles": cycles,
+            "last_health": last_health,
+            "avg_price_mean": round(avg_price, 2) if avg_price is not None else None,
+            "memory_entries": len(json.loads(self.memory_dump) if self.memory_dump else []),
+        }
+
+
+class FreysaSimulation:
+    """High-level orchestration helper for Freysa deterministic runs."""
+
+    def __init__(self, scenario: FreysaScenario) -> None:
+        self.scenario = scenario
+        self.agent = FreysaSentientAI(
+            name=scenario.agent_name, version=scenario.agent_version
+        )
+
+    def run(self) -> SimulationResult:
+        statuses: List[dict] = []
+        base = self.scenario.start_time
+        for update in self.scenario.updates:
+            current_time = base + update.offset
+            status = self.agent.run_cycle(update.payload(), current_time=current_time)
+            statuses.append(status)
+        memory_dump = self.agent.export_memory(pretty=True)
+        return SimulationResult(statuses=statuses, memory_dump=memory_dump)
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "scenario",
+        type=Path,
+        nargs="?",
+        help="Path to a JSON file describing the scenario to execute.",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Only print a summary after execution instead of every cycle status.",
+    )
+    parser.add_argument(
+        "--generate-template",
+        action="store_true",
+        help="Print a template scenario JSON to stdout and exit.",
+    )
+    return parser.parse_args(argv)
+
+
+def template_scenario() -> FreysaScenario:
+    return FreysaScenario(
+        agent_name="AllPurposeAI",
+        agent_version="3.4",
+        start_time=1_725_000_000,
+        updates=[
+            ScenarioUpdate(
+                offset=0,
+                price_feed={"BTC": 687_285_012_000.0, "ETH": 3_125_500_000.0},
+                messages=["hi"],
+            ),
+            ScenarioUpdate(
+                offset=60,
+                price_feed={"BTC": 696_291_000_000.0, "ETH": 3_130_000_000.0},
+                messages=["status?"],
+            ),
+            ScenarioUpdate(
+                offset=120,
+                price_feed={"BTC": 686_300_540_000.0, "ETH": 3_152_200_000.0},
+                messages=["thanks"],
+            ),
+        ],
+    )
+
+
+def load_scenario(path: Path) -> FreysaScenario:
+    if not path.exists():
+        raise FileNotFoundError(f"Scenario file not found: {path}")
+    raw = json.loads(path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("Scenario file must contain a JSON object")
+    return FreysaScenario.from_json(raw)
+
+
+def display_statuses(statuses: Iterable[dict]) -> None:
+    for index, status in enumerate(statuses, start=1):
+        print(f"\n--- cycle {index} ---")
+        print(json.dumps(status, indent=2))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+
+    if args.generate_template:
+        scenario = template_scenario()
+        json.dump(scenario.to_json(), sys.stdout, indent=2)
+        print()
+        return 0
+
+    if args.scenario is None:
+        print("No scenario file provided. Use --generate-template to create one.", file=sys.stderr)
+        return 2
+
+    try:
+        scenario = load_scenario(args.scenario)
+    except (OSError, ValueError) as exc:
+        print(f"Failed to load scenario: {exc}", file=sys.stderr)
+        return 2
+
+    sim = FreysaSimulation(scenario)
+    result = sim.run()
+
+    if args.summary:
+        print(json.dumps(result.summary(), indent=2))
+    else:
+        display_statuses(result.statuses)
+        print("\n==== memory dump ====")
+        print(result.memory_dump)
+    return 0
+
+
 if __name__ == "__main__":
-    print("=== Freysa Agent Core Test ===")
-    
-    agent = FreysaAgentCore("demo_agent_001")
-    test_clock = TEEClock(1_725_000_000)
-    
-    test_data = [
-        {"market": {"BTC": 687_285_012_000.0, "ETH": 3_125_500_000.0}, "messages": ["ping"]},
-        {"market": {"BTC": 696_291_000_000.0, "ETH": 3_130_000_000.0}, "messages": ["status"]},
-        {"market": {"BTC": 700_000_000_000.0}, "messages": ["alert!"]},
-    ]
-    
-    for i, data in enumerate(test_data):
-        test_clock.advance()
-        print(f"\nCycle {i + 1} @ {test_clock.now()}")
-        result = agent.execute_cycle(data)
-        print(json.dumps(result, indent=2))
-    
-    print("\nFinal status:")
-    print(json.dumps(agent.get_status(), indent=2))
-
-PY
-
-# 2. Update (or create) freysa.yaml
-if ! grep -q "^agents:" freysa.yaml 2>/dev/null; then
-  echo "agents:" >> freysa.yaml
-fi
-cat >> freysa.yaml <<'YAML'
-  - name: all_purpose_ai
-    entry: agents/freysa_agent.py
-    class: FreysaSentientAI
-    tee: true
-    on_chain: true
-    memory_cap: 2048
-YAML
-
-# 3. Commit and push
-git add agents/freysa_agent.py freysa.yaml
-git commit -m "Add deterministic FreysaSentientAI agent"
-git push origin main          # or push a branch and open a PR
+    raise SystemExit(main())
