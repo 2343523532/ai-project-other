@@ -120,8 +120,10 @@ class FreysaSentientAI:
     # ------------------------------------------------------------------- #
     #  Public API
     # ------------------------------------------------------------------- #
-    def run_cycle(self, oracle_payload: JSON, *, current_time: Optional[int] = None) -> None:
-        """One deterministic reasoning cycle."""
+    def run_cycle(
+        self, oracle_payload: JSON, *, current_time: Optional[int] = None
+    ) -> JSON:
+        """Execute one deterministic reasoning cycle and return the new status."""
         now = current_time if current_time is not None else self.clock.now()
 
         self.state.last_update = now
@@ -131,11 +133,12 @@ class FreysaSentientAI:
         if not isinstance(oracle_payload, dict):
             self._log("error", {"reason": "oracle payload is not a dict"}, timestamp=now)
             self.state.health = "idle"
-            return
+            return self.get_status()
 
         self._ingest_oracle(oracle_payload, timestamp=now)
         self._reflect(timestamp=now)
         self._self_update(timestamp=now)  # decides final health
+        return self.get_status()
 
     def export_memory(self, pretty: bool = False) -> str:
         dump = [asdict(e) for e in self.memory]
