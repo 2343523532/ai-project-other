@@ -13,6 +13,8 @@ market scenarios while keeping the runtime deterministic and auditable.
 │   ├── __init__.py          # Convenience exports for the Freysa agent
 │   └── freysa_agent.py      # Core deterministic agent implementation
 ├── freysa0.py               # CLI utilities for running simulations
+├── tests/                   # Test suite
+├── pyproject.toml           # Project configuration
 ├── LICENSE
 └── README.md
 ```
@@ -64,6 +66,17 @@ Each cycle status includes:
 
 The memory log at the end reveals every logged event in chronological order,
 providing full traceability of the reasoning path the agent followed.
+
+## Development
+
+### Running Tests
+
+To run the test suite, ensure you have `pytest` installed (which is standard in many environments).
+
+```bash
+pip install pytest
+pytest
+```
 
 ## Extending the toolkit
 
