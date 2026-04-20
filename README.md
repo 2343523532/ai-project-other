@@ -13,6 +13,7 @@ market scenarios while keeping the runtime deterministic and auditable.
 │   ├── __init__.py          # Convenience exports for the Freysa agent
 │   └── freysa_agent.py      # Core deterministic agent implementation
 ├── freysa0.py               # CLI utilities for running simulations
+├── quantum_strat_v3.lisp    # Quantum-Entropic Strategist module (Common Lisp)
 ├── tests/                   # Test suite
 ├── pyproject.toml           # Project configuration
 ├── LICENSE
@@ -29,6 +30,12 @@ memory log, and produces structured status snapshots after each reasoning cycle.
 The script offers a command-line interface around the agent to make it easy to
 run repeatable simulations from JSON scenario files. It includes helpers to
 summarize the resulting state and to generate a starter scenario template.
+
+
+### `quantum_strat_v3.lisp`
+A standalone Common Lisp module implementing the user-requested Cognitive Layer
+V3 "Quantum-Entropic Strategist" with CLOS state objects, entropy-driven signal
+collapse, strategy generation, and an executable startup loop.
 
 ## Getting started
 
