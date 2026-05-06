@@ -62,3 +62,33 @@ class TestFreysaSimulation:
 
         memory = json.loads(result.memory_dump)
         assert len(memory) > 0
+
+    def test_summary_includes_analysis_fields(self):
+        scenario = FreysaScenario(
+            agent_name="SummaryAgent",
+            agent_version="0.2",
+            start_time=1000,
+            updates=[
+                ScenarioUpdate(offset=0, price_feed={"BTC": 100.0}, messages=["start"]),
+                ScenarioUpdate(offset=10, price_feed={"BTC": 110.0}, messages=["urgent crash"]),
+            ],
+        )
+
+        result = FreysaSimulation(scenario).run()
+        summary = result.summary()
+
+        assert summary["peak_risk_score"] >= 30
+        assert summary["alert_count"] >= 2
+        assert summary["final_trend"] == "rising"
+
+    def test_load_scenario_rejects_unsorted_offsets(self, tmp_path):
+        f = tmp_path / "scenario.json"
+        f.write_text(json.dumps({
+            "updates": [
+                {"offset": 10, "messages": ["late"]},
+                {"offset": 5, "messages": ["early"]},
+            ]
+        }))
+
+        with pytest.raises(ValueError, match="offsets"):
+            load_scenario(f)

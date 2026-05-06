@@ -79,3 +79,32 @@ class TestFreysaAgent:
         assert limiter.spike({"ETH": SimpleLimiter.ETH_SPIKE + 1})
         # AVG SPIKE is 6_290_000_000.0
         assert limiter.spike({"A": 7_000_000_000.0})
+
+    def test_analysis_tracks_price_moves_and_risk(self):
+        agent = FreysaSentientAI()
+        agent.run_cycle({"price_feed": {"BTC": 100.0, "ETH": 50.0}, "messages": ["baseline"]}, current_time=1)
+        status = agent.run_cycle(
+            {"price_feed": {"BTC": 110.0, "ETH": 45.0}, "messages": ["urgent crash?"]},
+            current_time=2,
+        )
+
+        analysis = status["analysis"]
+        assert analysis["trend"] == "mixed"
+        assert analysis["message_signal"] == "urgent"
+        assert analysis["risk_score"] >= 30
+        assert "urgent operator message detected" in analysis["alerts"]
+        btc_move = next(move for move in analysis["price_moves"] if move["asset"] == "BTC")
+        assert btc_move["change_pct"] == 10.0
+        assert btc_move["direction"] == "up"
+
+    def test_validation_filters_bad_price_values_and_normalizes_assets(self):
+        agent = FreysaSentientAI()
+        status = agent.run_cycle(
+            {"price_feed": {"btc": "123.45", "BAD": "nope", "NEG": -1}, "messages": ["  hello  ", ""]},
+            current_time=10,
+        )
+
+        assert status["state"]["inputs"]["price_feed"] == {"BTC": 123.45}
+        assert status["state"]["inputs"]["messages"] == ["hello"]
+        events = [entry.event for entry in agent.memory]
+        assert events.count("warn") == 2
