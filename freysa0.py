@@ -86,12 +86,19 @@ class SimulationResult:
         cycles = len(self.statuses)
         last_state = self.statuses[-1]["state"] if self.statuses else {}
         last_health = last_state.get("health")
+        analyses = [status.get("analysis", {}) for status in self.statuses]
         avg_prices = [status.get("avg_price") for status in self.statuses if status.get("avg_price")]
+        avg_risks = [analysis.get("risk_score", 0) for analysis in analyses]
         avg_price = sum(avg_prices) / len(avg_prices) if avg_prices else None
+        peak_risk = max(avg_risks) if avg_risks else 0
+        alert_count = sum(len(analysis.get("alerts", [])) for analysis in analyses)
         return {
             "cycles": cycles,
             "last_health": last_health,
             "avg_price_mean": round(avg_price, 2) if avg_price is not None else None,
+            "peak_risk_score": peak_risk,
+            "alert_count": alert_count,
+            "final_trend": analyses[-1].get("trend") if analyses else None,
             "memory_entries": len(json.loads(self.memory_dump) if self.memory_dump else []),
         }
 
@@ -134,6 +141,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Print a template scenario JSON to stdout and exit.",
     )
+    parser.add_argument(
+        "--alerts-only",
+        action="store_true",
+        help="Print only cycles with non-empty analysis alerts.",
+    )
     return parser.parse_args(argv)
 
 
@@ -168,11 +180,30 @@ def load_scenario(path: Path) -> FreysaScenario:
     raw = json.loads(path.read_text())
     if not isinstance(raw, dict):
         raise ValueError("Scenario file must contain a JSON object")
-    return FreysaScenario.from_json(raw)
+    scenario = FreysaScenario.from_json(raw)
+    validate_scenario(scenario)
+    return scenario
 
 
-def display_statuses(statuses: Iterable[dict]) -> None:
+def validate_scenario(scenario: FreysaScenario) -> None:
+    """Fail fast on malformed deterministic scenarios before running cycles."""
+    if not scenario.updates:
+        raise ValueError("Scenario must contain at least one update")
+    previous_offset = None
+    for index, update in enumerate(scenario.updates, start=1):
+        if update.offset < 0:
+            raise ValueError(f"Update {index} has a negative offset")
+        if previous_offset is not None and update.offset < previous_offset:
+            raise ValueError("Scenario update offsets must be sorted ascending")
+        if update.price_feed is None and update.messages is None:
+            raise ValueError(f"Update {index} must include price_feed or messages")
+        previous_offset = update.offset
+
+
+def display_statuses(statuses: Iterable[dict], *, alerts_only: bool = False) -> None:
     for index, status in enumerate(statuses, start=1):
+        if alerts_only and not status.get("analysis", {}).get("alerts"):
+            continue
         print(f"\n--- cycle {index} ---")
         print(json.dumps(status, indent=2))
 
@@ -202,7 +233,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.summary:
         print(json.dumps(result.summary(), indent=2))
     else:
-        display_statuses(result.statuses)
+        display_statuses(result.statuses, alerts_only=args.alerts_only)
         print("\n==== memory dump ====")
         print(result.memory_dump)
     return 0

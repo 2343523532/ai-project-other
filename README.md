@@ -24,7 +24,8 @@ market scenarios while keeping the runtime deterministic and auditable.
 The module exposes the `FreysaSentientAI` class, a deterministic agent core that
 operates on simple oracle payloads containing price feeds and textual messages.
 It supports dependency injection for clocks and limiter policies, keeps a bounded
-memory log, and produces structured status snapshots after each reasoning cycle.
+memory log, computes deterministic per-cycle market analytics, and produces
+structured status snapshots after each reasoning cycle.
 
 ### `freysa0.py`
 The script offers a command-line interface around the agent to make it easy to
@@ -62,17 +63,26 @@ If you only need a concise view, use the `--summary` flag:
 python freysa0.py scenario.json --summary
 ```
 
+To focus review on anomalous activity, print only cycles that generated alerts:
+
+```
+python freysa0.py scenario.json --alerts-only
+```
+
 ### 3. Interpreting the results
 
 Each cycle status includes:
 - the agent metadata (`name`, `version`, deterministic `id`),
 - the internal state snapshot (awareness, health, inputs, etc.),
 - the average asset price for the current cycle (when available),
+- deterministic analysis with per-asset price moves, trend, risk score, risk
+  level, message signal, and generated alerts,
 - the most recent message seen by the agent, and
 - how many memory entries are currently stored.
 
 The memory log at the end reveals every logged event in chronological order,
-providing full traceability of the reasoning path the agent followed.
+including oracle validation warnings and analysis events, providing full
+traceability of the reasoning path the agent followed.
 
 ## Development
 
@@ -89,6 +99,9 @@ pytest
 
 - Implement a custom limiter by subclassing `agents.freysa_agent.SimpleLimiter`
   and injecting it into the `FreysaSimulation` helper.
+- Tune the deterministic risk model by adjusting the movement threshold, message
+  signal keywords, or limiter thresholds in `agents.freysa_agent.FreysaSentientAI`
+  and `agents.freysa_agent.SimpleLimiter`.
 - Replace the static clock with a more sophisticated deterministic clock that
   matches your environment.
 - Build higher-level analytics by importing the `FreysaSimulation` class from
