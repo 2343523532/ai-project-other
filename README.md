@@ -24,7 +24,8 @@ market scenarios while keeping the runtime deterministic and auditable.
 The module exposes the `FreysaSentientAI` class, a deterministic agent core that
 operates on simple oracle payloads containing price feeds and textual messages.
 It supports dependency injection for clocks and limiter policies, keeps a bounded
-memory log, and produces structured status snapshots after each reasoning cycle.
+memory log, normalizes incoming oracle payloads, and produces structured status
+snapshots with deterministic market insights after each reasoning cycle.
 
 ### `freysa0.py`
 The script offers a command-line interface around the agent to make it easy to
@@ -62,13 +63,23 @@ If you only need a concise view, use the `--summary` flag:
 python freysa0.py scenario.json --summary
 ```
 
+For a full run with a compact event-count section before the memory dump, add
+`--events`:
+
+```
+python freysa0.py scenario.json --events
+```
+
 ### 3. Interpreting the results
 
 Each cycle status includes:
 - the agent metadata (`name`, `version`, deterministic `id`),
 - the internal state snapshot (awareness, health, inputs, etc.),
 - the average asset price for the current cycle (when available),
-- the most recent message seen by the agent, and
+- a `market_insight` block with asset count, min/max assets, spread, trend,
+  risk level, and spike detection,
+- the most recent normalized message seen by the agent,
+- deterministic event counts, and
 - how many memory entries are currently stored.
 
 The memory log at the end reveals every logged event in chronological order,
@@ -93,6 +104,8 @@ pytest
   matches your environment.
 - Build higher-level analytics by importing the `FreysaSimulation` class from
   `freysa0.py` and embedding it into larger evaluation pipelines.
+- Use `FreysaSentientAI.recent_memory()` and `event_counts()` for lightweight
+  diagnostics without parsing a full memory export.
 
 ## License
 

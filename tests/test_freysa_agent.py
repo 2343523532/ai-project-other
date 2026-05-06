@@ -79,3 +79,46 @@ class TestFreysaAgent:
         assert limiter.spike({"ETH": SimpleLimiter.ETH_SPIKE + 1})
         # AVG SPIKE is 6_290_000_000.0
         assert limiter.spike({"A": 7_000_000_000.0})
+
+    def test_market_insight_tracks_risk_and_trend(self):
+        agent = FreysaSentientAI()
+
+        first = agent.run_cycle(
+            {"price_feed": {"btc": 100.0, "ETH": 300.0}, "messages": [" baseline "]},
+            current_time=10,
+        )
+        assert first["market_insight"]["asset_count"] == 2
+        assert first["market_insight"]["average_price"] == 200.0
+        assert first["market_insight"]["trend"] == "baseline"
+        assert first["market_insight"]["risk_level"] == "normal"
+        assert first["last_message"] == "baseline"
+
+        second = agent.run_cycle(
+            {"price_feed": {"BTC": SimpleLimiter.BTC_SPIKE + 1, "ETH": 500.0}},
+            current_time=20,
+        )
+        assert second["state"]["health"] == "active"
+        assert second["market_insight"]["trend"] == "rising"
+        assert second["market_insight"]["risk_level"] == "critical"
+        assert second["market_insight"]["spike_detected"] is True
+
+    def test_input_normalization_warns_and_recent_memory_filters(self):
+        agent = FreysaSentientAI()
+        status = agent.run_cycle(
+            {
+                "price_feed": {
+                    " btc ": "42.5",
+                    "BAD": "nope",
+                    "NEG": -1,
+                },
+                "messages": [" ok ", "", 12],
+                "extra": "ignored",
+            },
+            current_time=50,
+        )
+
+        assert status["state"]["inputs"]["price_feed"] == {"BTC": 42.5}
+        assert status["state"]["inputs"]["messages"] == ["ok"]
+        assert status["event_counts"]["warn"] == 3
+        warnings = agent.recent_memory(limit=10, event="warn")
+        assert [entry["event"] for entry in warnings] == ["warn", "warn", "warn"]

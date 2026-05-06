@@ -1,13 +1,18 @@
 # freysa_agent.py
 """
-Deterministic, hardware-agnostic agent skeleton for the freysa.ai
-TEE / on-chain environment.
+Deterministic, hardware-agnostic agent core for repeatable Freysa simulations.
+
+The module intentionally keeps all reasoning local and auditable: every cycle
+normalizes oracle inputs, derives a compact market insight, updates state through
+an injected limiter policy, and records the path in a bounded memory log.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections import Counter
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Protocol, TypeAlias, final
 
@@ -17,12 +22,14 @@ JSON: TypeAlias = Dict[str, Any]
 #  Protocols / small pluggable helpers
 # --------------------------------------------------------------------------- #
 class Clock(Protocol):
-    """Return an integer UNIX epoch second – must be deterministic inside TEE."""
+    """Return an integer UNIX epoch second; deterministic clocks are preferred."""
+
     def now(self) -> int: ...
 
 
 class Limiter(Protocol):
-    """Return True if the agent should act given current inputs."""
+    """Return True if the agent should move from idle to active."""
+
     def spike(self, price_feed: Dict[str, float]) -> bool: ...
 
 
@@ -38,6 +45,25 @@ class InputBundle:
         return asdict(self)
 
 
+@dataclass(slots=True, frozen=True)
+class MarketInsight:
+    """Deterministic summary of the most recent oracle price feed."""
+
+    asset_count: int = 0
+    average_price: Optional[float] = None
+    min_asset: Optional[str] = None
+    min_price: Optional[float] = None
+    max_asset: Optional[str] = None
+    max_price: Optional[float] = None
+    spread: Optional[float] = None
+    trend: str = "unknown"
+    risk_level: str = "unknown"
+    spike_detected: bool = False
+
+    def to_json(self) -> JSON:
+        return asdict(self)
+
+
 @dataclass(slots=True)
 class SelfState:
     awareness: str = "observing"
@@ -45,6 +71,7 @@ class SelfState:
     health: str = "idle"
     inputs: InputBundle = field(default_factory=InputBundle)
     cycle_count: int = 0
+    last_insight: MarketInsight = field(default_factory=MarketInsight)
 
     def snapshot(self) -> JSON:
         return asdict(self)
@@ -62,7 +89,8 @@ class LogEntry:
 #  Default deterministic helpers
 # --------------------------------------------------------------------------- #
 class StaticClock:
-    """A trivial deterministic clock – must be injected by caller per cycle."""
+    """A trivial deterministic clock that callers may advance per cycle."""
+
     def __init__(self, initial: int = 0) -> None:
         self._t = initial
 
@@ -75,7 +103,8 @@ class StaticClock:
 
 
 class SimpleLimiter:
-    """Reference implementation of Limiter with hard-coded thresholds."""
+    """Reference limiter with deterministic hard-coded spike thresholds."""
+
     BTC_SPIKE = 690_000_000_000
     ETH_SPIKE = 3_140_000_000
     AVG_SPIKE = 6_290_000_000.0
@@ -88,6 +117,30 @@ class SimpleLimiter:
         eth = price_feed.get("ETH", 0) > self.ETH_SPIKE
         return avg_price > self.AVG_SPIKE or btc or eth
 
+    def explain(self, price_feed: Dict[str, float]) -> JSON:
+        """Expose threshold comparisons for audit trails and status snapshots."""
+        if not price_feed:
+            return {
+                "spike": False,
+                "average_price": None,
+                "triggered_thresholds": [],
+            }
+
+        avg_price = sum(price_feed.values()) / len(price_feed)
+        triggered = []
+        if avg_price > self.AVG_SPIKE:
+            triggered.append("AVG_SPIKE")
+        if price_feed.get("BTC", 0) > self.BTC_SPIKE:
+            triggered.append("BTC_SPIKE")
+        if price_feed.get("ETH", 0) > self.ETH_SPIKE:
+            triggered.append("ETH_SPIKE")
+
+        return {
+            "spike": bool(triggered),
+            "average_price": round(avg_price, 2),
+            "triggered_thresholds": triggered,
+        }
+
 
 # --------------------------------------------------------------------------- #
 #  Main Agent
@@ -95,6 +148,7 @@ class SimpleLimiter:
 @final
 class FreysaSentientAI:
     MAX_MEMORY: Optional[int] = 2_048  # smaller default for on-chain cost
+    MAX_MESSAGE_LENGTH = 512
 
     def __init__(
         self,
@@ -113,6 +167,7 @@ class FreysaSentientAI:
 
         self.state = SelfState()
         self.memory: List[LogEntry] = []
+        self._previous_avg_price: Optional[float] = None
 
         # Genesis event always at t=0
         self._log("boot", {"agent_id": self.id, "version": self.version}, timestamp=0)
@@ -136,6 +191,7 @@ class FreysaSentientAI:
             return self.get_status()
 
         self._ingest_oracle(oracle_payload, timestamp=now)
+        self._analyze_market(timestamp=now)
         self._reflect(timestamp=now)
         self._self_update(timestamp=now)  # decides final health
         return self.get_status()
@@ -151,21 +207,34 @@ class FreysaSentientAI:
     def reset_memory(self) -> None:
         self.memory.clear()
         self.state = SelfState()
+        self._previous_avg_price = None
         self._log("reset", {"agent_id": self.id}, timestamp=0)
 
     def get_status(self) -> JSON:
-        pf = self.state.inputs.price_feed or {}
         messages = self.state.inputs.messages or []
-        avg_price = round(sum(pf.values()) / len(pf), 2) if pf else None
+        insight = self.state.last_insight
         return {
             "name": self.name,
             "version": self.version,
             "id": self.id,
             "state": self.state.snapshot(),
-            "avg_price": avg_price,
+            "avg_price": insight.average_price,
             "last_message": messages[-1] if messages else None,
+            "market_insight": insight.to_json(),
             "memory_length": len(self.memory),
+            "event_counts": self.event_counts(),
         }
+
+    def event_counts(self) -> Dict[str, int]:
+        """Return deterministic counts of logged event types."""
+        return dict(sorted(Counter(entry.event for entry in self.memory).items()))
+
+    def recent_memory(self, limit: int = 5, *, event: Optional[str] = None) -> List[JSON]:
+        """Return the most recent memory entries, optionally filtered by event."""
+        if limit < 1:
+            return []
+        entries = [entry for entry in self.memory if event is None or entry.event == event]
+        return [asdict(entry) for entry in entries[-limit:]]
 
     # ------------------------------------------------------------------- #
     #  Internal helpers
@@ -174,53 +243,151 @@ class FreysaSentientAI:
         """Validate and store incoming oracle data deterministically."""
         allowed = {f.name for f in fields(InputBundle)}
         filtered = {k: payload[k] for k in payload if k in allowed}
+        ignored = sorted(k for k in payload if k not in allowed)
+        if ignored:
+            self._log("warn", {"reason": "ignored oracle fields", "fields": ignored}, timestamp=timestamp)
 
-        # -- price feed -------------------------------------------------- #
-        pf_raw = filtered.get("price_feed")
-        price_feed: Optional[Dict[str, float]] = self._validate_price_feed(pf_raw, timestamp)
-
-        # -- messages ---------------------------------------------------- #
-        msgs_raw = filtered.get("messages")
-        messages: Optional[List[str]] = self._validate_messages(msgs_raw, timestamp)
+        price_feed = self._validate_price_feed(filtered.get("price_feed"), timestamp)
+        messages = self._validate_messages(filtered.get("messages"), timestamp)
 
         self.state.inputs = InputBundle(price_feed=price_feed, messages=messages)
         self._log("oracle_input", self.state.inputs.to_json(), timestamp=timestamp)
 
     def _validate_price_feed(self, pf_raw: Any, timestamp: int) -> Optional[Dict[str, float]]:
-        if isinstance(pf_raw, dict):
+        if pf_raw is None:
+            return None
+        if not isinstance(pf_raw, dict):
+            self._log("warn", {"reason": "price_feed not dict"}, timestamp=timestamp)
+            return None
+
+        normalized: Dict[str, float] = {}
+        rejected: List[str] = []
+        for asset, value in pf_raw.items():
+            symbol = str(asset).strip().upper()
             try:
-                return {k: float(v) for k, v in pf_raw.items()}
+                price = float(value)
             except (ValueError, TypeError):
-                self._log("warn", {"reason": "non-numeric price values"}, timestamp=timestamp)
-        else:
-            if pf_raw is not None:
-                self._log("warn", {"reason": "price_feed not dict"}, timestamp=timestamp)
-        return None
+                rejected.append(str(asset))
+                continue
+            if not symbol or not math.isfinite(price) or price < 0:
+                rejected.append(str(asset))
+                continue
+            normalized[symbol] = price
+
+        if rejected:
+            self._log(
+                "warn",
+                {"reason": "invalid price values", "assets": sorted(rejected)},
+                timestamp=timestamp,
+            )
+        return normalized or None
 
     def _validate_messages(self, msgs_raw: Any, timestamp: int) -> Optional[List[str]]:
-        if isinstance(msgs_raw, list) and all(isinstance(m, str) for m in msgs_raw):
-            return msgs_raw
-        else:
-            if msgs_raw is not None:
-                self._log("warn", {"reason": "messages not list[str]"}, timestamp=timestamp)
-        return None
+        if msgs_raw is None:
+            return None
+        if not isinstance(msgs_raw, list):
+            self._log("warn", {"reason": "messages not list[str]"}, timestamp=timestamp)
+            return None
+
+        messages: List[str] = []
+        rejected = 0
+        truncated = 0
+        for raw in msgs_raw:
+            if not isinstance(raw, str):
+                rejected += 1
+                continue
+            message = raw.strip()
+            if not message:
+                rejected += 1
+                continue
+            if len(message) > self.MAX_MESSAGE_LENGTH:
+                message = message[: self.MAX_MESSAGE_LENGTH]
+                truncated += 1
+            messages.append(message)
+
+        if rejected or truncated:
+            self._log(
+                "warn",
+                {
+                    "reason": "message normalization",
+                    "rejected": rejected,
+                    "truncated": truncated,
+                },
+                timestamp=timestamp,
+            )
+        return messages or None
+
+    def _analyze_market(self, *, timestamp: int) -> None:
+        """Build a compact, deterministic insight from the normalized feed."""
+        pf = self.state.inputs.price_feed or {}
+        if not pf:
+            self.state.last_insight = MarketInsight()
+            self._log("market_analysis", self.state.last_insight.to_json(), timestamp=timestamp)
+            return
+
+        sorted_prices = sorted(pf.items())
+        avg_price = round(sum(price for _, price in sorted_prices) / len(sorted_prices), 2)
+        min_asset, min_price = min(sorted_prices, key=lambda item: (item[1], item[0]))
+        max_asset, max_price = max(sorted_prices, key=lambda item: (item[1], item[0]))
+        spike_detected = self.limiter.spike(pf)
+        trend = self._trend(avg_price)
+        risk_level = self._risk_level(spike_detected, trend)
+
+        self.state.last_insight = MarketInsight(
+            asset_count=len(sorted_prices),
+            average_price=avg_price,
+            min_asset=min_asset,
+            min_price=round(min_price, 2),
+            max_asset=max_asset,
+            max_price=round(max_price, 2),
+            spread=round(max_price - min_price, 2),
+            trend=trend,
+            risk_level=risk_level,
+            spike_detected=spike_detected,
+        )
+        self._previous_avg_price = avg_price
+        self._log("market_analysis", self.state.last_insight.to_json(), timestamp=timestamp)
+
+    def _trend(self, avg_price: float) -> str:
+        if self._previous_avg_price is None:
+            return "baseline"
+        if avg_price > self._previous_avg_price:
+            return "rising"
+        if avg_price < self._previous_avg_price:
+            return "falling"
+        return "flat"
+
+    @staticmethod
+    def _risk_level(spike_detected: bool, trend: str) -> str:
+        if spike_detected and trend == "rising":
+            return "critical"
+        if spike_detected:
+            return "elevated"
+        if trend == "rising":
+            return "watch"
+        return "normal"
 
     def _reflect(self, *, timestamp: int) -> None:
-        """Lightweight metacognition placeholder."""
+        """Lightweight metacognition placeholder with concrete recent context."""
         last_event = self.memory[-1].event if self.memory else "none"
-        thought = f"reflecting on {last_event}"
+        insight = self.state.last_insight
+        thought = f"reflecting on {last_event}; market risk is {insight.risk_level}"
         self.state.awareness = "reflecting"
         self._log("reflect", {"thought": thought}, timestamp=timestamp)
         self.state.awareness = "observing"
 
     def _self_update(self, *, timestamp: int) -> None:
         """Adjust internal health/state based on limiter policy."""
-        pf = self.state.inputs.price_feed or {}
-        high_activity = self.limiter.spike(pf)
+        insight = self.state.last_insight
+        high_activity = insight.spike_detected
 
         action = "high market activity" if high_activity else "normal range"
         self.state.health = "active" if high_activity else "idle"
-        self._log("self_update", {"action": action}, timestamp=timestamp)
+        self._log(
+            "self_update",
+            {"action": action, "risk_level": insight.risk_level, "trend": insight.trend},
+            timestamp=timestamp,
+        )
 
     # ------------------------------------------------------------------- #
     #  Logging

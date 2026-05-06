@@ -62,3 +62,24 @@ class TestFreysaSimulation:
 
         memory = json.loads(result.memory_dump)
         assert len(memory) > 0
+
+    def test_summary_includes_risk_health_and_event_counts(self):
+        scenario = FreysaScenario(
+            agent_name="SummaryAgent",
+            agent_version="0.2",
+            start_time=1000,
+            updates=[
+                ScenarioUpdate(offset=0, price_feed={"BTC": 100.0}),
+                ScenarioUpdate(offset=1, price_feed={"BTC": 700_000_000_000.0}),
+            ],
+        )
+
+        result = FreysaSimulation(scenario).run()
+        summary = result.summary()
+
+        assert summary["cycles"] == 2
+        assert summary["spike_cycles"] == 1
+        assert summary["health_counts"] == {"active": 1, "idle": 1}
+        assert summary["risk_counts"] == {"critical": 1, "normal": 1}
+        assert summary["event_counts"]["market_analysis"] == 2
+        assert summary["last_market_insight"]["spike_detected"] is True

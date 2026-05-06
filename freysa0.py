@@ -86,14 +86,43 @@ class SimulationResult:
         cycles = len(self.statuses)
         last_state = self.statuses[-1]["state"] if self.statuses else {}
         last_health = last_state.get("health")
-        avg_prices = [status.get("avg_price") for status in self.statuses if status.get("avg_price")]
+        avg_prices = [status.get("avg_price") for status in self.statuses if status.get("avg_price") is not None]
         avg_price = sum(avg_prices) / len(avg_prices) if avg_prices else None
+        risk_levels = [
+            status.get("market_insight", {}).get("risk_level")
+            for status in self.statuses
+            if status.get("market_insight")
+        ]
+        health_counts = _count_values(
+            status.get("state", {}).get("health") for status in self.statuses
+        )
+        risk_counts = _count_values(risk_levels)
+        memory_entries = json.loads(self.memory_dump) if self.memory_dump else []
+        event_counts = _count_values(entry.get("event") for entry in memory_entries)
         return {
             "cycles": cycles,
             "last_health": last_health,
             "avg_price_mean": round(avg_price, 2) if avg_price is not None else None,
-            "memory_entries": len(json.loads(self.memory_dump) if self.memory_dump else []),
+            "spike_cycles": sum(
+                1 for status in self.statuses if status.get("market_insight", {}).get("spike_detected")
+            ),
+            "health_counts": health_counts,
+            "risk_counts": risk_counts,
+            "event_counts": event_counts,
+            "last_market_insight": self.statuses[-1].get("market_insight") if self.statuses else None,
+            "memory_entries": len(memory_entries),
         }
+
+
+def _count_values(values: Iterable[object]) -> dict:
+    """Count non-empty values in deterministic key order."""
+    counts: dict = {}
+    for value in values:
+        if value is None:
+            continue
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 class FreysaSimulation:
@@ -133,6 +162,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--generate-template",
         action="store_true",
         help="Print a template scenario JSON to stdout and exit.",
+    )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="Include deterministic event counts when printing a full run.",
     )
     return parser.parse_args(argv)
 
@@ -203,6 +237,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(result.summary(), indent=2))
     else:
         display_statuses(result.statuses)
+        if args.events:
+            print("\n==== event counts ====")
+            print(json.dumps(result.summary()["event_counts"], indent=2))
         print("\n==== memory dump ====")
         print(result.memory_dump)
     return 0
